@@ -4,6 +4,7 @@
 #include <fstream>
 #include <string>
 #include <commdlg.h> // Диалог выбора файла
+#include <shlobj.h>  // Получение иконки приложения
 
 using namespace std;
 
@@ -21,7 +22,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
 wstring GetLastAppPath();
 void SaveLastAppPath(const wstring& path);
 void OpenFileDialog(HWND hWnd);
-void EnsureConfigFileExists(); // Новая функция для создания файла, если его нет
+void DrawInfo(HDC hdc, HWND hWnd);      // Рисуем информацию о приложении
+void SetIconFromExe(HWND hWnd, const wstring& path); // Устанавливаем иконку приложения
+void EnsureConfigFileExists();          // Создаем файл, если его нет
+
+// Размеры окна
+const int WINDOW_WIDTH = 300;
+const int WINDOW_HEIGHT = 150;
 
 // Правильная сигнатура WinMain с использованием аннотаций
 int WINAPI WinMain(
@@ -41,9 +48,9 @@ int WINAPI WinMain(
 
     RegisterClassEx(&wc);
 
-    HWND hwnd = CreateWindow(L"MyWindowClass", L"C++ App",
+    HWND hwnd = CreateWindow(L"MyWindowClass", L"Горячая кнопка",
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
-        800, 600, nullptr, nullptr, hInstance, nullptr);
+        WINDOW_WIDTH, WINDOW_HEIGHT, nullptr, nullptr, hInstance, nullptr);
 
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
@@ -68,6 +75,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message)
     {
+    case WM_PAINT:
+        PAINTSTRUCT ps;
+        BeginPaint(hWnd, &ps);
+        DrawInfo(ps.hdc, hWnd); // Нарисовать информацию о приложении
+        EndPaint(hWnd, &ps);
+        break;
+
     case WM_COMMAND:
         if (LOWORD(wParam) == 1) // Код команды для кнопки или пункта меню
         {
@@ -103,6 +117,32 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     }
 
     return 0;
+}
+
+// Функция рисует информацию о последнем открытом приложении
+void DrawInfo(HDC hdc, HWND hWnd)
+{
+    RECT rect;
+    GetClientRect(hWnd, &rect);
+
+    wstring lastAppPath = GetLastAppPath();
+    wstring infoText = !lastAppPath.empty() ? L"Активное приложение: " + lastAppPath : L"Нет активного приложения.";
+
+    SetBkMode(hdc, TRANSPARENT);
+    TextOut(hdc, 10, 10, infoText.c_str(), infoText.length());
+
+    wstring hotkeyHint = L"(Ctrl+Shift+F1)";
+    TextOut(hdc, 10, 40, hotkeyHint.c_str(), hotkeyHint.length());
+}
+
+// Функция получает иконку из exe-файла и устанавливает её в окно
+void SetIconFromExe(HWND hWnd, const wstring& path)
+{
+    SHFILEINFO shfi = {};
+    if (SHGetFileInfo(path.c_str(), 0, &shfi, sizeof(SHFILEINFO), SHGFI_ICON | SHGFI_SMALLICON))
+    {
+        SendMessage(hWnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(shfi.hIcon));
+    }
 }
 
 // Функция чтения пути из файла конфигурации
@@ -153,6 +193,8 @@ void OpenFileDialog(HWND hWnd)
     {
         wstring selectedFile(szFile);
         SaveLastAppPath(selectedFile); // Сохраняем выбранный файл
+        SetIconFromExe(hWnd, selectedFile); // Устанавливаем иконку приложения
+        InvalidateRect(hWnd, NULL, TRUE); // Пересоздание окна для перерисовки текста
         MessageBox(hWnd, L"Файл успешно выбран и сохранён.", L"Успех", MB_OK | MB_ICONINFORMATION);
     }
     else
