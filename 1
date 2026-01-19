@@ -3,34 +3,35 @@
 #include <shellapi.h>
 #include <fstream>
 #include <string>
-#include <commdlg.h> // Диалог выбора файла
-#include <shlobj.h>  // Получение иконки приложения
 
 using namespace std;
 
-// Имя файла для хранения пути последнего запущенного приложения
-const wstring configFile = L"last_app.txt";
+// Имя файла для хранения путей приложений
+const wstring appsListFile = L"apps_list.txt";
 
-// Глобальные флаги состояний модификаторов Ctrl и Shift
-bool isCtrlPressed = false;
-bool isShiftPressed = false;
+// Максимальное число поддерживаемых приложений
+const int APP_COUNT = 4;
 
-// Уникальный идентификатор горячего ключа
-#define MY_HOTKEY_ID 1
+// Массив путей к приложениям
+wstring appPaths[APP_COUNT];
+
+// Уникальные идентификаторы горячих клавиш
+#define FIRST_APP_HOTKEY_ID 1
+#define SECOND_APP_HOTKEY_ID 2
+#define THIRD_APP_HOTKEY_ID 3
+#define FOURTH_APP_HOTKEY_ID 4
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
-wstring GetLastAppPath();
-void SaveLastAppPath(const wstring& path);
-void OpenFileDialog(HWND hWnd);
-void DrawInfo(HDC hdc, HWND hWnd);              // Рисуем информацию о приложении
-void SetIconFromExe(HWND hWnd, const wstring& path); // Устанавливаем иконку приложения
-void EnsureConfigFileExists();                  // Создаем файл, если его нет
+void ReadAppsList();                            // Читаем список приложений из файла
+void DrawAppTable(HDC hdc, HWND hWnd);          // Рисуем таблицу с названиями приложений и комбинациями клавиш
+void LaunchApp(int index);                      // Запускает приложение по индексу
+bool CheckIfFileExists(const wstring& path);    // Проверяет существование файла
 
 // Размеры окна
-const int WINDOW_WIDTH = 300;
-const int WINDOW_HEIGHT = 150;
+const int WINDOW_WIDTH = 400;
+const int WINDOW_HEIGHT = 200;
 
-// Правильная сигнатура WinMain с использованием аннотаций
+// Главная точка входа
 int WINAPI WinMain(
     _In_ HINSTANCE hInstance,
     _In_opt_ HINSTANCE hPrevInstance,
@@ -38,8 +39,8 @@ int WINAPI WinMain(
     _In_ int nCmdShow
 )
 {
-    // Убеждаемся, что файл конфигурации существует
-    EnsureConfigFileExists();
+    // Загружаем список приложений из файла
+    ReadAppsList();
 
     // Регистрация класса окна
     WNDCLASSEX wc = { sizeof(WNDCLASSEX), CS_HREDRAW | CS_VREDRAW,
@@ -48,18 +49,27 @@ int WINAPI WinMain(
 
     RegisterClassEx(&wc);
 
-    HWND hwnd = CreateWindow(L"MyWindowClass", L"Горячая кнопка",
+    HWND hwnd = CreateWindow(L"MyWindowClass", L"Быстрый запуск приложений",
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
         WINDOW_WIDTH, WINDOW_HEIGHT, nullptr, nullptr, hInstance, nullptr);
 
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
-    // Регистрация глобального хоткея Ctrl+Shift+F1
-    bool registered = RegisterHotKey(hwnd, MY_HOTKEY_ID, MOD_CONTROL | MOD_SHIFT, VK_F1);
-    if (!registered)
-    {
-        MessageBox(hwnd, L"Не удалось зарегистрировать горячую клавишу.", L"Ошибка", MB_OK | MB_ICONERROR);
+    // Регистрация горячих клавиш
+    bool firstRegistered = RegisterHotKey(hwnd, FIRST_APP_HOTKEY_ID, MOD_CONTROL | MOD_SHIFT, VK_F1);
+    bool secondRegistered = RegisterHotKey(hwnd, SECOND_APP_HOTKEY_ID, MOD_CONTROL | MOD_SHIFT, VK_F2);
+    bool thirdRegistered = RegisterHotKey(hwnd, THIRD_APP_HOTKEY_ID, MOD_CONTROL | MOD_SHIFT, VK_F3);
+    bool fourthRegistered = RegisterHotKey(hwnd, FOURTH_APP_HOTKEY_ID, MOD_CONTROL | MOD_SHIFT, VK_F4);
+
+    if (!(firstRegistered && secondRegistered && thirdRegistered && fourthRegistered)) {
+        // Подробное сообщение об ошибке регистрации
+        wstring errorMsg = L"Не удалось зарегистрировать следующую(-ие) горячую(-ие) клавишу(-и):\n";
+        if (!firstRegistered) errorMsg += L"- Ctrl+Shift+F1\n";
+        if (!secondRegistered) errorMsg += L"- Ctrl+Shift+F2\n";
+        if (!thirdRegistered) errorMsg += L"- Ctrl+Shift+F3\n";
+        if (!fourthRegistered) errorMsg += L"- Ctrl+Shift+F4\n";
+        MessageBox(hwnd, errorMsg.c_str(), L"Ошибка", MB_OK | MB_ICONERROR);
     }
 
     MSG msg;
@@ -69,8 +79,11 @@ int WINAPI WinMain(
         DispatchMessage(&msg);
     }
 
-    // Отмена регистрации горячего ключа при закрытии окна
-    UnregisterHotKey(hwnd, MY_HOTKEY_ID);
+    // Отмена регистрации горячих клавиш при завершении
+    UnregisterHotKey(hwnd, FIRST_APP_HOTKEY_ID);
+    UnregisterHotKey(hwnd, SECOND_APP_HOTKEY_ID);
+    UnregisterHotKey(hwnd, THIRD_APP_HOTKEY_ID);
+    UnregisterHotKey(hwnd, FOURTH_APP_HOTKEY_ID);
 
     return static_cast<int>(msg.wParam);
 }
@@ -80,35 +93,29 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     switch (message)
     {
     case WM_PAINT:
+    {
         PAINTSTRUCT ps;
         BeginPaint(hWnd, &ps);
-        DrawInfo(ps.hdc, hWnd); // Нарисовать информацию о приложении
+        DrawAppTable(ps.hdc, hWnd); // Рисуем таблицу с названиями приложений
         EndPaint(hWnd, &ps);
-        break;
-
-    case WM_COMMAND:
-        if (LOWORD(wParam) == 1) // Код команды для кнопки или пункта меню
-        {
-            OpenFileDialog(hWnd); // Открываем диалог выбора файла
-        }
-        break;
+    }
+    break;
 
     case WM_HOTKEY:
-        if (LOWORD(wParam) == MY_HOTKEY_ID) // Идентификатор нашего хоткея
+        switch (wParam)
         {
-            OutputDebugString(L"Произошло нажатие Ctrl+Shift+F1\n");
-
-            wstring lastAppPath = GetLastAppPath();
-            if (!lastAppPath.empty())
-            {
-                OutputDebugString((L"Последний файл: " + lastAppPath + L"\n").c_str()); // Выводим путь в отладчик
-
-                ShellExecute(nullptr, L"open", lastAppPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-            }
-            else
-            {
-                MessageBox(hWnd, L"Последнее приложение не найдено.", L"Внимание", MB_OK | MB_ICONWARNING);
-            }
+        case FIRST_APP_HOTKEY_ID:
+            LaunchApp(0); // Запустить первое приложение
+            break;
+        case SECOND_APP_HOTKEY_ID:
+            LaunchApp(1); // Запустить второе приложение
+            break;
+        case THIRD_APP_HOTKEY_ID:
+            LaunchApp(2); // Запустить третье приложение
+            break;
+        case FOURTH_APP_HOTKEY_ID:
+            LaunchApp(3); // Запустить четвёртое приложение
+            break;
         }
         break;
 
@@ -123,107 +130,100 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     return 0;
 }
 
-// Функция рисует информацию о последнем открытом приложении
-void DrawInfo(HDC hdc, HWND hWnd)
+// Читаем список приложений из файла
+void ReadAppsList()
+{
+    // Открываем в широких символах
+    wifstream file(appsListFile);
+    if (!file.is_open()) {
+        MessageBox(NULL, L"Не удалось открыть файл настроек.", L"Ошибка", MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    for (int i = 0; i < APP_COUNT; ++i)
+    {
+        if (!std::getline(file, appPaths[i])) {
+            // Достигнута ли конец файла или произошла ошибка
+            appPaths[i].clear();
+        }
+
+        // Удалим возможные конечные символы возврата
+        if (!appPaths[i].empty() && !appPaths[i].empty()) {
+            // Удаление возможных символов CR/LF по крайней мере из конца строки
+            if (!appPaths[i].empty() && (appPaths[i].back() == L'\r' || appPaths[i].back() == L'\n')) {
+                while (!appPaths[i].empty() && (appPaths[i].back() == L'\r' || appPaths[i].back() == L'\n'))
+                    appPaths[i].pop_back();
+            }
+        }
+
+        if (appPaths[i].empty())
+        {
+            // Пустая строка
+            wcout << L"ReadAppsList: пустая строка на позиции " << i << endl;
+        }
+        else
+        {
+            wcout << L"ReadAppsList: path[" << i << L"] = " << appPaths[i] << endl;
+        }
+    }
+    file.close();
+}
+
+// Рисуем таблицу с названиями приложений и горячими клавишами
+void DrawAppTable(HDC hdc, HWND hWnd)
 {
     RECT rect;
     GetClientRect(hWnd, &rect);
 
-    wstring lastAppPath = GetLastAppPath();
-    wstring infoText = !lastAppPath.empty() ? L"Активное приложение: " + lastAppPath : L"Нет активного приложения.";
-
     SetBkMode(hdc, TRANSPARENT);
-    TextOut(hdc, 10, 10, infoText.c_str(), infoText.length());
 
-    wstring hotkeyHint = L"(Ctrl+Shift+F1)";
-    TextOut(hdc, 10, 40, hotkeyHint.c_str(), hotkeyHint.length());
-}
+    wstring hotKeys[] = { L"Ctrl+Shift+F1", L"Ctrl+Shift+F2", L"Ctrl+Shift+F3", L"Ctrl+Shift+F4" };
 
-// Функция получает иконку из exe-файла и устанавливает её в окно
-void SetIconFromExe(HWND hWnd, const wstring& path)
-{
-    SHFILEINFO shfi = {};
-    if (SHGetFileInfo(path.c_str(), 0, &shfi, sizeof(SHFILEINFO), SHGFI_ICON | SHGFI_SMALLICON))
+    for (int i = 0; i < APP_COUNT; ++i)
     {
-        SendMessage(hWnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(shfi.hIcon));
+        // Извлекаем имя приложения из пути (получаем название без пути)
+        wstring appName;
+        if (!appPaths[i].empty()) {
+            size_t pos = appPaths[i].find_last_of(L'\\');
+            appName = (pos != wstring::npos) ? appPaths[i].substr(pos + 1) : appPaths[i];
+        }
+
+        // Формирование строки вида: "<Имя приложения> (<горячая клавиша>)"
+        wstring displayText;
+        if (!appName.empty()) {
+            displayText = appName + L" (" + hotKeys[i] + L")";
+        }
+        else {
+            displayText = L"(пусто) (" + hotKeys[i] + L")";
+        }
+
+        // Отображаем строку
+        TextOut(hdc, 10, 30 * (i + 1), displayText.c_str(), static_cast<int>(displayText.length()));
     }
 }
 
-// Функция чтения пути из файла конфигурации
-wstring GetLastAppPath()
+// Запуск приложения по указанному индексу
+void LaunchApp(int index)
 {
-    wifstream file(configFile);
-    wstring result;
-    if (file.is_open()) {
-        getline(file, result);
-        file.close();
+    if (index >= 0 && index < APP_COUNT && !appPaths[index].empty() &&
+        CheckIfFileExists(appPaths[index])) // Проверяем существование файла
+    {
+        wcout << L"Launching: " << appPaths[index] << endl;
+        ShellExecute(NULL, L"open", appPaths[index].c_str(), NULL, NULL, SW_SHOWNORMAL);
     }
     else
     {
-        MessageBox(NULL, L"Не удается прочитать файл 'last_app.txt'.", L"Ошибка", MB_OK | MB_ICONERROR);
-    }
-    return result;
-}
-
-// Функция сохранения пути в конфигурационный файл
-void SaveLastAppPath(const wstring& path)
-{
-    wofstream file(configFile, ios_base::trunc); // Режим trunc удаляет старое содержимое
-    if (file.is_open()) {
-        file << path << endl;
-        file.close();
-    }
-    else
-    {
-        MessageBox(NULL, L"Не удается записать файл 'last_app.txt'.", L"Ошибка", MB_OK | MB_ICONERROR);
+        wstring msg = L"Приложение не найдено или не существует.";
+        if (!appPaths[index].empty()) {
+            msg = L"Не найден файл: " + appPaths[index];
+        }
+        MessageBox(NULL, msg.c_str(), L"Ошибка запуска", MB_OK | MB_ICONWARNING);
     }
 }
 
-// Диалог выбора файла
-void OpenFileDialog(HWND hWnd)
+// Проверка существования файла с помощью Windows API
+bool CheckIfFileExists(const wstring& path)
 {
-    OPENFILENAME ofn{};
-    wchar_t szFile[MAX_PATH];
-
-    ZeroMemory(&ofn, sizeof(ofn));
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = hWnd;
-    ofn.lpstrFilter = L"Все файлы (*.*)\0*.*\0"; // Фильтры файлов
-    ofn.nMaxFile = MAX_PATH;
-    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
-    ofn.lpstrFile = szFile;
-
-    if (GetOpenFileName(&ofn))
-    {
-        wstring selectedFile(szFile);
-        SaveLastAppPath(selectedFile); // Сохраняем выбранный файл
-        SetIconFromExe(hWnd, selectedFile); // Устанавливаем иконку приложения
-        RedrawWindow(hWnd, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW); // Принудительное обновление окна
-        MessageBox(hWnd, L"Файл успешно выбран и сохранён.", L"Успех", MB_OK | MB_ICONINFORMATION);
-    }
-    else
-    {
-        MessageBox(hWnd, L"Ничего не выбрано.", L"Ошибка", MB_OK | MB_ICONWARNING);
-    }
-}
-
-// Функция создания файла, если его нет
-void EnsureConfigFileExists()
-{
-    HANDLE handle = CreateFile(configFile.c_str(),
-        GENERIC_WRITE,
-        FILE_SHARE_READ,
-        NULL,
-        OPEN_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL,
-        NULL);
-
-    if (handle != INVALID_HANDLE_VALUE)
-    {
-        CloseHandle(handle);
-    }
-    else
-    {
-        MessageBox(NULL, L"Не удалось создать файл 'last_app.txt'.", L"Ошибка", MB_OK | MB_ICONERROR);
-    }
+    DWORD attributes = GetFileAttributes(path.c_str());
+    return (attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY));
 }
